@@ -2,18 +2,11 @@
  *  Schneider WDE002182 Power Outlet Driver for Hubitat Elevation
  *
  *  Author: Carl Rådetorp
- *  Version: 1.2.1
+ *  Version: 1.2.3
  *  Date: 2025-08-10
  *
- *  Adds:
- *   - EnergyMeter capability (kWh accumulation from power W)
- *   - User-configurable "price per kWh" and currency
- *   - Custom command setEnergyPrice() to update spot/variable price at runtime
- *   - Live cost tracking (energy * price)
- *   - Automatic monthly reset at 00:00 on the 1st of each month (end-of-month rollover)
- *   - Manual resetEnergy() command
- *   - Safer math (BigDecimal) and guards for missing readings
- *   - Optional info log for resetEnergy
+ *  Change in this version:
+ *   - Use Hubitat's built-in "unit" parameter in sendEvent so that units appear in Current States instead of appended to values.
  */
 
 metadata {
@@ -28,9 +21,12 @@ metadata {
         capability "Health Check"
         capability "EnergyMeter"
 
-        attribute "current", "number"
-        attribute "cost", "number"
-        attribute "energyPrice", "number"
+        attribute "current", "number"  // A
+        attribute "voltage", "number"  // V
+        attribute "power", "number"    // W
+        attribute "cost", "number"     // currency
+        attribute "energy", "number"   // kWh
+        attribute "energyPrice", "number" // price per kWh
         attribute "lastReset", "string"
 
         command "resetEnergy"
@@ -45,8 +41,6 @@ metadata {
         input name: "autoResetMonthly", type: "bool", title: "Auto reset at end of month (00:00 on the 1st)", defaultValue: true
     }
 }
-
-// ===== Lifecycle =====
 
 def installed() { logDebug "Installed"; initialize() }
 
@@ -66,7 +60,7 @@ private initialize() {
     state.lastTs = now()
     state.energyWh = (state.energyWh ?: 0L) as Long
     state.lastPowerW = (device.currentValue("power") ?: 0) as BigDecimal
-    if (pricePerKwh != null) sendEvent(name: "energyPrice", value: toBD(pricePerKwh))
+    if (pricePerKwh != null) sendEvent(name: "energyPrice", value: pricePerKwh, unit: "${currency}/kWh")
     unschedule()
     runEvery1Minute("tick")
     schedule("0 0 0 * * ?", "dailyMidnight")
@@ -78,8 +72,6 @@ private disableDebugLogging() {
     device.updateSetting("debugLogging", [value: "false", type: "bool"])
 }
 
-// ===== Configure reporting from device =====
-
 def configure() {
     logDebug "Configuring device..."
     def cmds = []
@@ -90,16 +82,20 @@ def configure() {
     return delayBetween(cmds, 200)
 }
 
-// ===== Parsing =====
-
 def parse(String description) {
     logDebug "Parsing: ${description}"
     def event = zigbee.getEvent(description)
     if (event) {
         logDebug "Zigbee event: ${event}"
-        sendEvent(event)
         if (event.name == "power") {
             try { state.lastPowerW = toBD(event.value) } catch (e) { state.lastPowerW = toBD(0) }
+            sendEvent(name: "power", value: toBD(event.value), unit: "W")
+        } else if (event.name == "voltage") {
+            sendEvent(name: "voltage", value: toBD(event.value), unit: "V")
+        } else if (event.name == "current") {
+            sendEvent(name: "current", value: toBD(event.value), unit: "A")
+        } else {
+            sendEvent(event)
         }
         return
     }
@@ -128,8 +124,6 @@ def parse(String description) {
     }
 }
 
-// ===== Commands =====
-
 def on()  { logDebug "Sending ON";  zigbee.on() }
 
 def off() { logDebug "Sending OFF"; zigbee.off() }
@@ -150,20 +144,18 @@ def healthCheck() { logDebug "healthCheck() called"; ping() }
 
 def resetEnergy() {
     state.energyWh = 0L
-    sendEvent(name: "energy", value: 0.0, unit: "kWh")
-    sendEvent(name: "cost", value: 0.0, unit: currency)
+    sendEvent(name: "energy", value: 0.000, unit: "kWh")
+    sendEvent(name: "cost", value: 0.00, unit: currency)
     sendEvent(name: "lastReset", value: isoNow())
     if (infoLogging) log.info "Energy and cost reset."
 }
 
 def setEnergyPrice(value) {
     def p = toBD(value ?: 0)
-    sendEvent(name: "energyPrice", value: p)
+    sendEvent(name: "energyPrice", value: p, unit: "${currency}/kWh")
     computeCost()
     if (infoLogging) log.info "Energy price updated to ${p} ${currency}/kWh"
 }
-
-// ===== Scheduling helpers =====
 
 def dailyMidnight() {
     if (!autoResetMonthly) return
@@ -205,7 +197,6 @@ private computeCost(BigDecimal kwh = null) {
     }
 }
 
-// ===== Logging Helpers =====
 private void logDebug(Object msg) {
     try {
         if (debugLogging) log.debug "${device.displayName ?: device.name}: ${msg}"
@@ -214,7 +205,6 @@ private void logDebug(Object msg) {
     }
 }
 
-// ===== Utils =====
 private BigDecimal toBD(val) {
     if (val == null) return new BigDecimal(0)
     if (val instanceof BigDecimal) return val
