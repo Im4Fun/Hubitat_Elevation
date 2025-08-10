@@ -12,8 +12,8 @@
  *  Only triggers on new events, not duplicates.
  *
  *  Changelog:
- *  * 1.1.5 - Added consecutive API timeout count and improved error logging.
- *  * 1.1.4 - Removed City/Region option, replaced with single area field. Switched reset timer to seconds.
+ *  1.1.5 - Added consecutive API timeout count and improved error logging.
+ *  1.1.4 - Removed City/Region option, replaced with single area field. Switched reset timer to seconds.
  */
 
 metadata {
