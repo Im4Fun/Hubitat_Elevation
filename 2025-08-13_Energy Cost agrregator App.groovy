@@ -9,7 +9,7 @@
  *    Aggregates energy usage from selected devices and estimates cost
  *    using either a fixed price per kWh or a dynamic price read from
  *    another device (e.g., Tibber). Optionally creates a child
- *    "Energy Summary" device to expose totals for dashboards.
+ *    "Energy Summary" device to expose totals.
  *
  *  Changelog:
  *   1.0.1 - Fix child device namespace + send numeric attribute values
