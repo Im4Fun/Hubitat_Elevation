@@ -6,7 +6,7 @@
  * Date: 2025-08-13
  *
  * Description:
- *  Virtual device used by the app to expose totals for Rule Machine and Dashboards.
+ *  Virtual device used by the app to expose totals for Rule Machine.
  *
  * Changelog:
  * 1.0.1 - Add Refresh capability and syncFromParent; tidy defaults & logging
