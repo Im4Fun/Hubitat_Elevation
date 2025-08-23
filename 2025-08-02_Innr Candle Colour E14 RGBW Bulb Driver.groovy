@@ -3,27 +3,27 @@
  *
  *  Author: Carl Rådetorp
  *  Namespace: calle
- *  Version: 1.1.0
- *  Date: 2025-08-20
+ *  Version: 1.0.0
+ *  Date: 2025-08-02
  *
  *  Description:
  *  Native Hubitat Zigbee driver for Innr RB 250 C and RB 251 C E14 candle colour RGBW bulbs.
+ *  Scene and Room Lighting compatible: setColor always turns bulb on (matches built-in driver logic).
+ *  All attributes always initialized and kept in sync.
+ *  Remembers last non-zero level for on().
+ *  Supports on/off, brightness, color temperature, and color control (Hue/Saturation).
+ *  Configures standard reporting and adds manual hue/saturation reporting.
+ *  User-configurable transition time for smooth fades.
+ *  setHue(), setSaturation(), colorMode tracking, basic health check, and full attribute sync.
  *
- *  Additions in 1.1.0:
- *  - Optional pre-staging: set level/color/CT without turning the bulb on
- *  - Power-on behavior (ZCL On/Off cluster attr 0x4003): Off, On, or Last State
- *
- *  Notes:
- *  - setColor/setColorTemperature no longer force on() when pre-staging is enabled
- *  - setLevel uses a non-On/Off Zigbee command (Move to Level, 0x00) when pre-staging is enabled
- *  - When pre-staging is disabled, behavior matches built-in logic (commands may turn the bulb on)
+ *  Changelog:
+ *  1.0.0 - Initial release, production-ready and fully Room Lighting/Scene compatible
  */
-
-import hubitat.zigbee.zcl.DataType
 
 metadata {
     definition(name: "Innr Candle Colour E14 RGBW Bulb", namespace: "calle", author: "Carl Rådetorp") {
         capability "Actuator"
+        capability "Sensor"               // for Dashboard Attribute tiles
         capability "Switch"
         capability "Switch Level"
         capability "Color Control"
@@ -34,9 +34,13 @@ metadata {
 
         attribute "colorMode", "string"
         attribute "Status", "string"
+        attribute "powerOnBehavior", "string" // text: Off/On/Last State/Bulb Default
+        attribute "powerOnBehaviorCode", "number" // numeric: 0/1/2/255
 
         command "configure"
         command "ping"
+        command "setPowerOnBehavior"
+        command "refreshPowerOnBehavior"
 
         fingerprint profileId: "0104",
                     inClusters: "0000,0003,0004,0005,0006,0008,0300",
@@ -54,14 +58,32 @@ metadata {
         input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: true
         input name: "transitionTime", type: "number", title: "Transition Time (seconds)", defaultValue: 1, range: "0..10"
         input name: "offlineTimeout", type: "number", title: "Timeout for offline status (minutes)", defaultValue: 10, range: "1..120"
-        input name: "enablePreStaging", type: "bool", title: "Enable color/level pre-staging (don’t turn on when setting)", defaultValue: false
-        input name: "sceneCompatSetColorOn", type: "bool", title: "Room Lighting compatibility: setColor turns bulb on", defaultValue: true
-        input name: "sceneCompatCTOn", type: "bool", title: "Room Lighting compatibility: setColorTemperature turns bulb on", defaultValue: true
-        input name: "powerOnBehavior", type: "enum", title: "Power-On Behavior (on mains restore)", options: ["0":"Off", "1":"On", "2":"Last State"], defaultValue: "2"
+        input name: "powerOnBehavior", type: "enum", title: "Power-On Behavior",
+              options: ["0":"Off", "1":"On", "2":"Last State", "255":"Bulb Default"],
+              defaultValue: "255"
     }
 }
 
-// ========================= Lifecycle =========================
+// ---- Helpers ----
+
+private String startUpOnOffToText(Integer val) {
+    switch (val) {
+        case 0: return "Off"
+        case 1: return "On"
+        case 2: return "Last State"
+        case 255: return "Bulb Default"
+        default: return "Unknown (" + val + ")"
+    }
+}
+
+private void emitPowerOnBehavior(Integer code) {
+    def text = startUpOnOffToText(code)
+    sendEvent(name: "powerOnBehavior", value: text, descriptionText: "Power-On Behavior: ${text}", isStateChange: true)
+    sendEvent(name: "powerOnBehaviorCode", value: code, descriptionText: "Power-On Behavior code: ${code}", isStateChange: true)
+    if (debugLogging) log.debug "Emitted Power-On Behavior -> ${code} (${text})"
+}
+
+// ---- Lifecycle ----
 
 def installed() {
     log.debug "Installed"
@@ -91,7 +113,7 @@ def logsOff() {
     log.warn "Debug logging disabled"
 }
 
-// ========================= Parsing =========================
+// ---- Parse ----
 
 def parse(String description) {
     if (debugLogging) log.debug "Parse: ${description}"
@@ -118,130 +140,90 @@ def parse(String description) {
     } else {
         if (debugLogging) log.debug "Unhandled: $description"
     }
-}
 
-// ========================= Commands =========================
-
-def on() {
-    if (debugLogging) log.debug "on()"
-    def curLevel = device.currentValue("level") as Integer
-    def useLevel = (state.lastLevel && state.lastLevel != 0) ? (state.lastLevel as Integer) : 100
-    sendEvent(name: "switch", value: "on")
-    if (!curLevel || curLevel == 0) {
-        sendEvent(name: "level", value: useLevel)
-        return zigbee.setLevel(useLevel)
-    } else {
-        return zigbee.on()
+    // Also parse raw read attributes for StartUpOnOff
+    def descMap = zigbee.parseDescriptionAsMap(description)
+    if (descMap?.cluster in ["0006", "6"]) {
+        def attr = descMap.attrId ?: descMap.attrInt
+        if ("4003".equalsIgnoreCase(attr?.toString())) {
+            def rawVal = descMap.value
+            try {
+                Integer intVal = Integer.parseInt(rawVal, 16)
+                emitPowerOnBehavior(intVal)
+                if (debugLogging) log.debug "Parsed StartUpOnOff ${rawVal} -> ${intVal}"
+            } catch (e) {
+                if (debugLogging) log.warn "Unable to parse StartUpOnOff value: ${rawVal} (${e})"
+            }
+        }
     }
 }
 
+// ---- Commands ----
+
+def on() {
+    if (debugLogging) log.debug "on()"
+    def curLevel = device.currentValue("level")
+    def useLevel = (state.lastLevel && state.lastLevel != 0) ? state.lastLevel : 100
+    sendEvent(name: "switch", value: "on")
+    if (!curLevel || curLevel == 0) {
+        sendEvent(name: "level", value: useLevel)
+        zigbee.setLevel(useLevel)
+    } else {
+        zigbee.on()
+    }
+}
 
 def off() {
     if (debugLogging) log.debug "off()"
     sendEvent(name: "switch", value: "off")
     sendEvent(name: "level", value: 0)
-    return zigbee.off()
-}
-
-// Helper: tenths of a second to uint16 hex (little-endian)
-private String hex16le(int val) {
-    int v = val & 0xFFFF
-    String lo = zigbee.convertToHexString(v & 0xFF, 2)
-    String hi = zigbee.convertToHexString((v >> 8) & 0xFF, 2)
-    return lo + hi
-}
-
-// ========================= Level =========================
-
-private Integer clampInt(def v, int lo, int hi) {
-    try {
-        int x = (v as Integer)
-        if (x < lo) return lo
-        if (x > hi) return hi
-        return x
-    } catch (e) {
-        return lo
-    }
+    zigbee.off()
 }
 
 def setLevel(level, duration = null) {
-    Integer lvl = clampInt(level, 0, 100)
     def time = (duration != null) ? duration : transitionTime
     def safeTime = (time instanceof Number) ? time : (time?.isNumber() ? time.toBigDecimal() : 1)
-    int rate = Math.round(safeTime * 10) // deciseconds
-    if (debugLogging) log.debug "setLevel(${lvl}) with transitionTime: ${rate} deciseconds (preStaging=${enablePreStaging})"
-
-    sendEvent(name: "level", value: lvl)
-    if (lvl == 0) {
+    def rate = Math.round(safeTime * 10)
+    if (debugLogging) log.debug "setLevel(${level}) with transitionTime: ${rate} deciseconds"
+    sendEvent(name: "level", value: level)
+    if (level == 0) {
         sendEvent(name: "switch", value: "off")
-        return zigbee.off()
     } else {
-        state.lastLevel = lvl
-        if (enablePreStaging) {
-            // Move to Level (0x00) — does NOT change On/Off state
-            String lvlHex = zigbee.convertToHexString((Math.round(lvl * 2.54) as Integer), 2) // 0-254 scale
-            String rateHexLe = hex16le(rate)
-            return [zigbee.command(0x0008, 0x00, lvlHex + rateHexLe)]
-        } else {
-            sendEvent(name: "switch", value: "on")
-            return zigbee.setLevel(lvl, rate)
-        }
+        sendEvent(name: "switch", value: "on")
+        state.lastLevel = level
     }
+    sendEvent(name: "colorMode", value: "RGB")
+    zigbee.setLevel(level, rate)
 }
-
-// ========================= Color Temperature =========================
 
 def setColorTemperature(temp) {
-    Integer ct = (temp as Integer)
     def time = transitionTime
     def safeTime = (time instanceof Number) ? time : (time?.isNumber() ? time.toBigDecimal() : 1)
-    int rate = Math.round(safeTime * 10)
-    if (debugLogging) log.debug "setColorTemperature(${ct}) with transitionTime: ${rate} deciseconds (preStaging=${enablePreStaging}, sceneCompatCTOn=${sceneCompatCTOn})"
-
+    def rate = Math.round(safeTime * 10)
+    if (debugLogging) log.debug "setColorTemperature(${temp}) with transitionTime: ${rate} deciseconds"
     sendEvent(name: "colorMode", value: "CT")
-    // If pre-staging is enabled but Room Lighting compatibility is on, still turn on for CT scenes
-    if ((!enablePreStaging) || (sceneCompatCTOn == true)) {
-        sendEvent(name: "switch", value: "on")
-    }
-    return zigbee.setColorTemperature(ct, rate)
+    sendEvent(name: "switch", value: "on")
+    zigbee.setColorTemperature(temp, rate)
 }
-
-// ========================= Color (Hue/Sat) =========================
 
 def setColor(Map color) {
     def time = transitionTime
     def safeTime = (time instanceof Number) ? time : (time?.isNumber() ? time.toBigDecimal() : 1)
-    int rate = Math.round(safeTime * 10)
-    boolean forceOn = (sceneCompatSetColorOn == true) || (!enablePreStaging)
-    if (debugLogging) log.debug "setColor(${color}) with transitionTime: ${rate} deciseconds (preStaging=${enablePreStaging}, sceneCompatSetColorOn=${sceneCompatSetColorOn}, forceOn=${forceOn})"
-
+    def rate = Math.round(safeTime * 10)
+    if (debugLogging) log.debug "setColor(${color}) with transitionTime: ${rate} deciseconds"
     sendEvent(name: "colorMode", value: "RGB")
-
-    List cmds = []
-
-    Integer lvl = (color.level != null) ? clampInt(color.level, 0, 100) : null
-    if (lvl != null) {
-        sendEvent(name: "level", value: lvl)
-        if (lvl != 0) state.lastLevel = lvl
-    }
-
-    if (forceOn) {
-        sendEvent(name: "switch", value: "on")
+    sendEvent(name: "switch", value: "on")
+    def cmds = []
+    if (color.level != null) {
+        sendEvent(name: "level", value: color.level)
+        if (color.level != 0) state.lastLevel = color.level
+        cmds += zigbee.setLevel(color.level, rate)
+    } else {
         cmds += zigbee.on()
-        if (lvl != null) {
-            cmds += zigbee.setLevel(lvl, rate)
-        }
-    } else if (lvl != null) {
-        // Strict pre-staging path: do NOT change on/off state
-        String lvlHex = zigbee.convertToHexString((Math.round(lvl * 2.54) as Integer), 2)
-        String rateHexLe = hex16le(rate)
-        cmds += zigbee.command(0x0008, 0x00, lvlHex + rateHexLe) // Move to Level (no On/Off)
     }
-
     cmds += zigbee.setColor(color, rate)
     return cmds
 }
-
 
 def setHue(hue) {
     if (debugLogging) log.debug "setHue(${hue})"
@@ -249,9 +231,8 @@ def setHue(hue) {
         hue: hue,
         saturation: device.currentValue("saturation") ?: 100
     ]
-    return setColor(color)
+    setColor(color)
 }
-
 
 def setSaturation(sat) {
     if (debugLogging) log.debug "setSaturation(${sat})"
@@ -259,10 +240,8 @@ def setSaturation(sat) {
         hue: device.currentValue("hue") ?: 0,
         saturation: sat
     ]
-    return setColor(color)
+    setColor(color)
 }
-
-// ========================= Maintenance =========================
 
 def refresh() {
     if (debugLogging) log.debug "refresh()"
@@ -273,36 +252,20 @@ def refresh() {
            zigbee.colorTemperatureRefresh() +
            zigbee.readAttribute(0x0300, 0x00) + // Current Hue
            zigbee.readAttribute(0x0300, 0x01) + // Current Saturation
-           zigbee.readAttribute(0x0006, 0x4003)   // StartUpOnOff
+           zigbee.readAttribute(0x0006, 0x4003)   // StartUpOnOff (Power-On Behavior)
 }
-
 
 def configure() {
-    if (debugLogging) log.debug "configure() - setting reporting, bindings, and startup behavior"
+    if (debugLogging) log.debug "configure() - setting reporting and bindings"
     sendEvent(name: "Status", value: "Online")
     state.lastCheckin = now()
-
-    List cmds = []
-    cmds += zigbee.onOffConfig()
-    cmds += zigbee.levelConfig()
-    cmds += zigbee.colorTemperatureConfig()
-    cmds += configureColorReporting()
-
-    // Apply power-on behavior (StartUpOnOff: enum8) if preference is set
-    if (powerOnBehavior != null) {
-        try {
-            int pov = (powerOnBehavior as Integer)
-            pov = (pov < 0 ? 0 : (pov > 2 ? 2 : pov))
-            if (debugLogging) log.debug "Writing StartUpOnOff (0x4003) = ${pov}"
-            cmds += zigbee.writeAttribute(0x0006, 0x4003, DataType.ENUM8, pov)
-        } catch (e) {
-            log.warn "Invalid powerOnBehavior value: ${powerOnBehavior} (${e})"
-        }
-    }
-
+    def cmds = zigbee.onOffConfig() +
+               zigbee.levelConfig() +
+               zigbee.colorTemperatureConfig() +
+               configureColorReporting()
+    cmds += setPowerOnBehavior()
     return cmds
 }
-
 
 def configureColorReporting() {
     if (debugLogging) log.debug "Configuring Hue and Saturation reporting"
@@ -312,19 +275,33 @@ def configureColorReporting() {
     return cmds
 }
 
+def setPowerOnBehavior(value = null) {
+    def setting = value ?: (powerOnBehavior ?: "255")
+    if (debugLogging) log.debug "Setting Power-On Behavior to ${setting}"
+    // Cluster 0x0006 On/Off, Attribute 0x4003 StartUpOnOff (enum8 / 0x30)
+    def cmds = []
+    cmds += zigbee.writeAttribute(0x0006, 0x4003, 0x30, Integer.parseInt(setting as String))
+    // read-back so tiles update promptly
+    cmds += zigbee.readAttribute(0x0006, 0x4003)
+    return cmds
+}
+
+def refreshPowerOnBehavior() {
+    if (debugLogging) log.debug "refreshPowerOnBehavior()"
+    return zigbee.readAttribute(0x0006, 0x4003)
+}
 
 def ping() {
     if (debugLogging) log.debug "Ping (health check) sent"
-    return zigbee.readAttribute(0x0006, 0x00)
+    zigbee.readAttribute(0x0006, 0x00)
 }
 
-// ========================= Health =========================
+// ---- Health ----
 
 def scheduleHealthCheck() {
     unschedule("doHealthCheck")
     schedule("0 */2 * ? * *", "doHealthCheck") // every 2 minutes
 }
-
 
 def doHealthCheck() {
     def timeoutMin = offlineTimeout ?: 10
