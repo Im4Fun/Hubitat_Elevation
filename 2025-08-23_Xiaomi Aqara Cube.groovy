@@ -82,7 +82,7 @@ void initialize() {
 
 void configure() {
     logInfo "Configure (binding/reporting is minimal; Xiaomi often ignores)"
-    // Xiaomi devices can be temperamental with binds; we primarily parse reports.
+
 }
 
 private Map<Integer,Integer> customMap() {
@@ -115,18 +115,14 @@ private Map<Integer, Map> effectiveMap() {
     return eff
 }
 
-/**
- * Main parse entry
- */
 void parse(String description) {
     if (debugLogging) log.debug "parse: $description"
     if (!description?.startsWith('read attr -') && !description?.startsWith('catchall:') && !description?.startsWith('profile:') && !description?.startsWith('raw:')) {
-        // Hubitat often gives key:value string; also handle newer map version
+
     }
     Map descMap = zigbee.parseDescriptionAsMap(description)
     if (debugLogging) log.debug "descMap: ${descMap}"
 
-    // We're interested in cluster 0x0012, attr 0x0055
     Integer clusterInt = safeHexToInt(descMap?.cluster)
     Integer attrInt    = safeHexToInt(descMap?.attrId)
     Integer cmdInt     = safeHexToInt(descMap?.command)
@@ -158,7 +154,6 @@ private void handleGesture(Integer code, Map raw) {
 }
 
 private void doPush(Integer buttonNumber, String reason) {
-    // Hubitat Button capability: sendEvent name: "pushed" with value = buttonNumber (number)
     def evt = [name: 'pushed', value: buttonNumber, isStateChange: true, type: 'physical', descriptionText: "Button ${buttonNumber} pushed (${reason})"]
     sendEvent(evt)
 }
