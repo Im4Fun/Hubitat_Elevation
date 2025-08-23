@@ -2,8 +2,8 @@
  * Tibber Smart Driver for Hubitat Elevation
  *
  *  Author: Carl Rådetorp
- *  Version: 1.0.4
- *  Date: 2025-07-29
+ *  Version: 1.2.0
+ *  Date: 2025-08-23
  *
  *  Description:
  *  Polls Tibber for electricity prices and consumption data using the Tibber API.
@@ -11,12 +11,22 @@
  *  Mirrors price level to presence and temperature for Easy Dashboard compatibility.
  *  Designed for rule automation and dashboard display with minimal UI clutter.
  *
+ *  Fixed Cost + Adjusted Level feature:
+ *  - Adds a user-defined fixed cost (per kWh) on top of Tibber prices.
+ *  - REPLACES original price attributes with adjusted values:
+ *      currentPrice, priceMinToday, priceMaxToday, priceNextHour, pricePlus2Hour,
+ *      lastUnitPrice, lastUnitPriceVAT, lastCost
+ *  - Optionally compute and use an **Adjusted Price Level** based on thresholds applied to the adjusted price,
+ *    and drive presence/temperature from that level.
+ *
  *  Changelog:
  *  1.0.0 - Initial release
  *  1.0.1 - Dashboard mapping: presence + temperature = priceLevel
  *  1.0.2 - Timestamp parsing now uses milliseconds (SSSZ)
  *  1.0.3 - Fixed null error in consumption
  *  1.0.4 - Fixed invalid cron schedule for 60+ minute intervals
+ *  1.1.0 - Added Fixed Cost (per kWh) and replaced price attributes with adjusted values
+ *  1.2.0 - Added Adjusted Price Level option and threshold-based mapping for presence/temperature
  */
 
 metadata {
@@ -58,6 +68,10 @@ metadata {
   preferences {
     input name: "accessToken", type: "password", title: "Tibber API Token", required: true
     input name: "pollInterval", type: "number", title: "Polling interval (minutes)", defaultValue: 60, range: "1..1440"
+    input name: "fixedCost", type: "number", title: "Fixed cost (per kWh)", defaultValue: 0, required: false
+    input name: "useAdjustedLevel", type: "bool", title: "Use Adjusted Price Level for presence/temperature (overrides Tibber level)", defaultValue: true
+    input name: "cheapThreshold", type: "number", title: "Adjusted price ≤ this is CHEAP (per kWh)", required: false
+    input name: "expensiveThreshold", type: "number", title: "Adjusted price ≥ this is EXPENSIVE (per kWh)", required: false
     input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: true
   }
 }
@@ -104,44 +118,77 @@ def pollPrice() {
       def current = priceInfo.current
       def today = priceInfo.today
 
-      sendEvent(name: "currentPrice", value: round2(current.total))
+      // Fixed cost per kWh (defaults to 0)
+      def fc = (fixedCost != null) ? (fixedCost as BigDecimal) : 0G
+
+      // Base values from Tibber (kept for reference)
       sendEvent(name: "priceEnergy", value: round2(current.energy))
       sendEvent(name: "priceTax", value: round2(current.tax))
-      sendEvent(name: "priceLevel", value: current.level)
       sendEvent(name: "priceCurrency", value: current.currency)
       sendEvent(name: "priceStartAt", value: current.startsAt)
-      sendEvent(name: "statusText", value: current.level)
 
-      if (current.level == "CHEAP") {
-        sendEvent(name: "presence", value: "present")
-        sendEvent(name: "temperature", value: 1)
-      } else if (current.level == "NORMAL") {
-        sendEvent(name: "presence", value: "not present")
-        sendEvent(name: "temperature", value: 2)
-      } else {
-        sendEvent(name: "presence", value: "not present")
-        sendEvent(name: "temperature", value: 3)
-      }
+      // Adjusted price replaces original attributes
+      def adjustedCurrent = round2((current.total ?: 0) + fc)
+      sendEvent(name: "currentPrice", value: adjustedCurrent)
 
+      // Min/Max today
       def minPrice = today.min { it.total }
       def maxPrice = today.max { it.total }
-      sendEvent(name: "priceMinToday", value: round2(minPrice.total))
-      sendEvent(name: "priceMaxToday", value: round2(maxPrice.total))
+      sendEvent(name: "priceMinToday", value: round2((minPrice.total ?: 0) + fc))
+      sendEvent(name: "priceMaxToday", value: round2((maxPrice.total ?: 0) + fc))
       sendEvent(name: "priceMinAt", value: minPrice.startsAt)
       sendEvent(name: "priceMaxAt", value: maxPrice.startsAt)
 
-      def cleanedDate = current.startsAt.replaceFirst(/([+-]\d{2}):(\d{2})$/, '$1$2')
+      // Next two hours
+      def cleanedDate = current.startsAt.replaceFirst(/([+-]\d{2}):(\d{2})\$/, '\$1\$2')
       def now = new Date().parse("yyyy-MM-dd'T'HH:mm:ss.SSSZ", cleanedDate)
       def next = today.find { it.startsAt.startsWith(now.plus(1).format("yyyy-MM-dd'T'HH")) }
       def plus2 = today.find { it.startsAt.startsWith(now.plus(2).format("yyyy-MM-dd'T'HH")) }
 
       if (next) {
-        sendEvent(name: "priceNextHour", value: round2(next.total))
+        sendEvent(name: "priceNextHour", value: round2((next.total ?: 0) + fc))
         sendEvent(name: "priceNextHourAt", value: next.startsAt)
       }
       if (plus2) {
-        sendEvent(name: "pricePlus2Hour", value: round2(plus2.total))
+        sendEvent(name: "pricePlus2Hour", value: round2((plus2.total ?: 0) + fc))
         sendEvent(name: "pricePlus2HourAt", value: plus2.startsAt)
+      }
+
+      // Compute level to use for status/presence/temperature
+      def levelToUse = current.level
+      if (useAdjustedLevel) {
+        BigDecimal cheapT = (cheapThreshold != null) ? (cheapThreshold as BigDecimal) : null
+        BigDecimal expT   = (expensiveThreshold != null) ? (expensiveThreshold as BigDecimal) : null
+        if (cheapT != null && expT != null && cheapT > expT) {
+          // swap if misconfigured
+          def tmp = cheapT; cheapT = expT; expT = tmp
+        }
+        if (cheapT != null && adjustedCurrent != null && adjustedCurrent <= cheapT) {
+          levelToUse = 'CHEAP'
+        } else if (expT != null && adjustedCurrent != null && adjustedCurrent >= expT) {
+          levelToUse = 'EXPENSIVE'
+        } else if (cheapT != null || expT != null) {
+          levelToUse = 'NORMAL'
+        } else {
+          // No thresholds provided: adjusted level equals Tibber's level (adding a constant doesn't change ranking)
+          levelToUse = current.level
+        }
+      }
+
+      // Publish level used for dashboards and status
+      sendEvent(name: "priceLevel", value: levelToUse)
+      sendEvent(name: "statusText", value: levelToUse)
+
+      // Presence/Temperature mapping based on chosen level
+      if (levelToUse == "CHEAP") {
+        sendEvent(name: "presence", value: "present")
+        sendEvent(name: "temperature", value: 1)
+      } else if (levelToUse == "NORMAL") {
+        sendEvent(name: "presence", value: "not present")
+        sendEvent(name: "temperature", value: 2)
+      } else {
+        sendEvent(name: "presence", value: "not present")
+        sendEvent(name: "temperature", value: 3)
       }
     }
   } catch (e) {
@@ -163,12 +210,23 @@ def pollConsumption() {
 
       sendEvent(name: "consumption", value: round2(node.consumption))
       sendEvent(name: "consumptionUnit", value: node.consumptionUnit)
-      sendEvent(name: "lastUnitPrice", value: round2(node.unitPrice))
-      sendEvent(name: "lastUnitPriceVAT", value: round2(node.unitPriceVAT))
-      sendEvent(name: "lastCost", value: round2(node.cost))
+
+      // Fixed cost per kWh (defaults to 0)
+      def fc = (fixedCost != null) ? (fixedCost as BigDecimal) : 0G
+
+      // Replace unit prices and cost with adjusted values
+      def adjUnit = (node.unitPrice != null) ? round2(node.unitPrice + fc) : null
+      def adjUnitVAT = (node.unitPriceVAT != null) ? round2(node.unitPriceVAT + fc) : null
+      sendEvent(name: "lastUnitPrice", value: adjUnit)
+      sendEvent(name: "lastUnitPriceVAT", value: adjUnitVAT)
+
+      def adjustedCost = (node.consumption != null && adjUnit != null) ? round2(node.consumption * adjUnit) : null
+      sendEvent(name: "lastCost", value: adjustedCost)
+
       sendEvent(name: "lastConsumptionFrom", value: node.from)
       sendEvent(name: "lastConsumptionTo", value: node.to)
 
+      // Mirror to Power (W)
       def watts = (node.consumption != null) ? round2(node.consumption * 1000) : 0
       sendEvent(name: "power", value: watts)
     }
