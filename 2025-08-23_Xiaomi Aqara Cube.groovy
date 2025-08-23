@@ -30,38 +30,33 @@
 import groovy.transform.Field
 
 metadata {
-    definition(name: "Xiaomi Aqara Cube (Minimal)", namespace: "calle", author: "Carl Rådetorp") {
+    definition(name: "Xiaomi Aqara Cube (Minimal + Battery)", namespace: "calle", author: "Carl Rådetorp") {
         capability "Sensor"
         capability "PushableButton"
+        capability "Battery"
         capability "Configuration"
         capability "Initialize"
 
         attribute  "lastGestureCode", "number"
         attribute  "lastGestureName", "string"
 
-        command    "resetDebugCounter"
-
-        fingerprint profileId: "0104", endpointId: "02", inClusters: "0000,0003,0019,0012", outClusters: "0000,0004,0003,0005", manufacturer: "LUMI", model: "lumi.sensor_cube", deviceJoinName: "Xiaomi Aqara Cube"
-        fingerprint profileId: "0104", endpointId: "01", inClusters: "0000,0003,0019,0012", outClusters: "0000,0004,0003,0005", manufacturer: "LUMI", model: "lumi.sensor_cube", deviceJoinName: "Xiaomi Aqara Cube"
+        // Common Aqara Cube fingerprints
+        fingerprint profileId: "0104", endpointId: "02", inClusters: "0000,0003,0019,0012,0001", outClusters: "0000,0004,0003,0005", manufacturer: "LUMI", model: "lumi.sensor_cube", deviceJoinName: "Xiaomi Aqara Cube"
+        fingerprint profileId: "0104", endpointId: "01", inClusters: "0000,0003,0019,0012,0001", outClusters: "0000,0004,0003,0005", manufacturer: "LUMI", model: "lumi.sensor_cube", deviceJoinName: "Xiaomi Aqara Cube"
     }
 
     preferences {
         input name: "descLogging", type: "bool", title: "Enable descriptionText logging", defaultValue: true
         input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: false
-        input name: "customMapJson", type: "string", title: "Custom gesture→button map (JSON)", description: 'e.g. {"0":1, "2":3, "3":4}', required: false
-        input name: "unknownAsEvent", type: "bool", title: "Emit unknown codes as button 99 events", defaultValue: true
+        input name: "unknownAsEvent", type: "bool", title: "Emit unknown gesture codes as button 99 events", defaultValue: true
+        input name: "battMinV", type: "decimal", title: "Battery 0% voltage (V)", defaultValue: 2.7
+        input name: "battMaxV", type: "decimal", title: "Battery 100% voltage (V)", defaultValue: 3.1
+        input name: "mirrorBatteryToState", type: "bool", title: "Also store battery as State Variable (batteryPct)", defaultValue: true
     }
 }
 
 @Field static final Map<Integer, Map> DEFAULT_GESTURES = [
-    0: [btn:1, name:'shake'],
-    1: [btn:2, name:'wakeup'],
-    2: [btn:3, name:'flip90'],
-    3: [btn:4, name:'flip180'],
-    4: [btn:5, name:'slide'],
-    5: [btn:6, name:'tap'],
-    6: [btn:7, name:'rotate_cw'],
-    7: [btn:8, name:'rotate_ccw']
+    0: [btn:1, name:'shake']
 ]
 
 @Field static final Integer FALLBACK_BTN = 99
@@ -80,63 +75,49 @@ void initialize() {
     logInfo "Initialize"
 }
 
-void configure() {
-    logInfo "Configure (binding/reporting is minimal; Xiaomi often ignores)"
-
-}
-
-private Map<Integer,Integer> customMap() {
-    if (!settings?.customMapJson) return [:]
-    try {
-        def parsed = new groovy.json.JsonSlurper().parseText(settings.customMapJson as String)
-        Map<Integer,Integer> m = [:]
-        parsed?.each { k, v ->
-            Integer keyInt = (k instanceof Number) ? (k as Integer) : Integer.parseInt(k as String)
-            Integer valInt = (v as Integer)
-            m[keyInt] = valInt
-        }
-        return m
-    } catch (e) {
-        logWarn "Invalid customMapJson: $e"
-        return [:]
-    }
+def configure() {
+    logInfo "Configure: reading & setting battery reporting"
+    def cmds = []
+    // Read both percentage and voltage once
+    cmds += zigbee.readAttribute(0x0001, 0x0021) // BatteryPercentageRemaining
+    cmds += zigbee.readAttribute(0x0001, 0x0020) // BatteryVoltage
+    // Configure reporting where supported (uint8 data type 0x20)
+    cmds += zigbee.configureReporting(0x0001, 0x0021, 0x20, 3600, 21600, 1) // 1% change, 1–6h
+    cmds += zigbee.configureReporting(0x0001, 0x0020, 0x20, 3600, 21600, 1) // 0.1V change, 1–6h
+    return cmds
 }
 
 private Map<Integer, Map> effectiveMap() {
     Map<Integer, Map> eff = [:]
-    // Start with defaults
     DEFAULT_GESTURES.each { k, v -> eff[k] = v.clone() as Map }
-    // Apply overrides for button numbers if provided
-    customMap().each { code, btnNum ->
-        Map cur = eff[code] ?: [name:"code_${code}"]
-        cur.btn = btnNum
-        eff[code] = cur
-    }
     return eff
 }
 
 void parse(String description) {
     if (debugLogging) log.debug "parse: $description"
-    if (!description?.startsWith('read attr -') && !description?.startsWith('catchall:') && !description?.startsWith('profile:') && !description?.startsWith('raw:')) {
-
-    }
     Map descMap = zigbee.parseDescriptionAsMap(description)
     if (debugLogging) log.debug "descMap: ${descMap}"
 
     Integer clusterInt = safeHexToInt(descMap?.cluster)
     Integer attrInt    = safeHexToInt(descMap?.attrId)
-    Integer cmdInt     = safeHexToInt(descMap?.command)
 
+    // Gestures – cluster 0x0012 attr 0x0055 (integer code)
     if (clusterInt == 0x0012 && attrInt == 0x0055) {
         Integer valueInt = safeHexToInt(descMap?.value)
-        handleGesture(valueInt, descMap)
+        handleGesture(valueInt)
+        return
+    }
+
+    // Battery – Power Configuration cluster
+    if (clusterInt == 0x0001) {
+        handleBattery(descMap)
         return
     }
 
     if (debugLogging) log.debug "Unhandled message: ${descMap}"
 }
 
-private void handleGesture(Integer code, Map raw) {
+private void handleGesture(Integer code) {
     Map<Integer, Map> map = effectiveMap()
     Map entry = map[code]
 
@@ -153,6 +134,40 @@ private void handleGesture(Integer code, Map raw) {
     if (descLogging) logInfo "Gesture code ${code} → ${(btn ?: FALLBACK_BTN)} (${entry?.name ?: 'unknown'})"
 }
 
+private void handleBattery(Map descMap) {
+    Integer attr = safeHexToInt(descMap?.attrId)
+    Integer raw  = safeHexToInt(descMap?.value)
+    if (attr == null || raw == null) return
+
+    if (attr == 0x0021) {
+        // BatteryPercentageRemaining: 0..200 (half-percent)
+        int pct = Math.max(0, Math.min(100, (int)Math.round(raw / 2.0)))
+        emitBattery(pct, "percent")
+    } else if (attr == 0x0020) {
+        // BatteryVoltage: units of 100 mV
+        BigDecimal volts = (raw / 10.0)
+        int pct = voltageToPercent(volts)
+        emitBattery(pct, "voltage ${volts}V")
+    }
+}
+
+private int voltageToPercent(BigDecimal v) {
+    BigDecimal minV = (settings?.battMinV ?: 2.7) as BigDecimal
+    BigDecimal maxV = (settings?.battMaxV ?: 3.1) as BigDecimal
+    if (v <= minV) return 0
+    if (v >= maxV) return 100
+    BigDecimal pct = ((v - minV) / (maxV - minV) * 100.0)
+    return Math.max(0, Math.min(100, pct.setScale(0, BigDecimal.ROUND_HALF_UP) as int))
+}
+
+private void emitBattery(int pct, String via) {
+    sendEvent(name: 'battery', value: pct, unit: '%')
+    if (settings?.mirrorBatteryToState) {
+        state.batteryPct = pct
+    }
+    if (descLogging) logInfo "Battery ${pct}% (${via})"
+}
+
 private void doPush(Integer buttonNumber, String reason) {
     def evt = [name: 'pushed', value: buttonNumber, isStateChange: true, type: 'physical', descriptionText: "Button ${buttonNumber} pushed (${reason})"]
     sendEvent(evt)
@@ -167,10 +182,6 @@ private Integer safeHexToInt(Object hex) {
     } catch (e) {
         return null
     }
-}
-
-void resetDebugCounter() {
-    logInfo "resetDebugCounter: (placeholder)"
 }
 
 private void logInfo(msg)  { if (descLogging) log.info  "${device.displayName ?: device.name}: ${msg}" }
