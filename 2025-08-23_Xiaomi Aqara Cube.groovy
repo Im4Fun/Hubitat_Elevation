@@ -78,10 +78,8 @@ void initialize() {
 def configure() {
     logInfo "Configure: reading & setting battery reporting"
     def cmds = []
-    // Read both percentage and voltage once
     cmds += zigbee.readAttribute(0x0001, 0x0021) // BatteryPercentageRemaining
     cmds += zigbee.readAttribute(0x0001, 0x0020) // BatteryVoltage
-    // Configure reporting where supported (uint8 data type 0x20)
     cmds += zigbee.configureReporting(0x0001, 0x0021, 0x20, 3600, 21600, 1) // 1% change, 1–6h
     cmds += zigbee.configureReporting(0x0001, 0x0020, 0x20, 3600, 21600, 1) // 0.1V change, 1–6h
     return cmds
@@ -101,14 +99,12 @@ void parse(String description) {
     Integer clusterInt = safeHexToInt(descMap?.cluster)
     Integer attrInt    = safeHexToInt(descMap?.attrId)
 
-    // Gestures – cluster 0x0012 attr 0x0055 (integer code)
     if (clusterInt == 0x0012 && attrInt == 0x0055) {
         Integer valueInt = safeHexToInt(descMap?.value)
         handleGesture(valueInt)
         return
     }
 
-    // Battery – Power Configuration cluster
     if (clusterInt == 0x0001) {
         handleBattery(descMap)
         return
@@ -140,11 +136,9 @@ private void handleBattery(Map descMap) {
     if (attr == null || raw == null) return
 
     if (attr == 0x0021) {
-        // BatteryPercentageRemaining: 0..200 (half-percent)
         int pct = Math.max(0, Math.min(100, (int)Math.round(raw / 2.0)))
         emitBattery(pct, "percent")
     } else if (attr == 0x0020) {
-        // BatteryVoltage: units of 100 mV
         BigDecimal volts = (raw / 10.0)
         int pct = voltageToPercent(volts)
         emitBattery(pct, "voltage ${volts}V")
