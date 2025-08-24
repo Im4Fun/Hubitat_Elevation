@@ -1,5 +1,5 @@
 /**
- * Innr Candle Colour Zigbee RGBW Bulb Driver for Hubitat Elevation
+ * INNR Candle Colour Zigbee RGBW Bulb Driver for Hubitat Elevation
  *
  *  Author: Carl Rådetorp
  *  Namespace: calle
@@ -7,7 +7,7 @@
  *  Date: 2025-08-02
  *
  *  Description:
- *  Native Hubitat Zigbee driver for Innr RB 250 C and RB 251 C E14 candle colour RGBW bulbs.
+ *  Native Hubitat Zigbee driver for INNR RB 250 C and RB 251 C E14 candle colour RGBW bulbs.
  *  Scene and Room Lighting compatible: setColor always turns bulb on (matches built-in driver logic).
  *  All attributes always initialized and kept in sync.
  *  Remembers last non-zero level for on().
@@ -21,7 +21,7 @@
  */
 
 metadata {
-    definition(name: "Innr Candle Colour E14 RGBW Bulb", namespace: "calle", author: "Carl Rådetorp") {
+    definition(name: "INNR Candle Colour E14 RGBW Bulb", namespace: "calle", author: "Carl Rådetorp") {
         capability "Actuator"
         capability "Sensor"               // for Dashboard Attribute tiles
         capability "Switch"
@@ -45,12 +45,12 @@ metadata {
         fingerprint profileId: "0104",
                     inClusters: "0000,0003,0004,0005,0006,0008,0300",
                     outClusters: "0019,000A",
-                    manufacturer: "Innr",
+                    manufacturer: "INNR",
                     model: "RB 250 C"
         fingerprint profileId: "0104",
                     inClusters: "0000,0003,0004,0005,0006,0008,0300",
                     outClusters: "0019,000A",
-                    manufacturer: "Innr",
+                    manufacturer: "INNR",
                     model: "RB 251 C"
     }
 
