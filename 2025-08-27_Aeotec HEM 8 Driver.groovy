@@ -2,8 +2,8 @@
  * Aeotec Home Energy Meter 8 (ZWA046) Driver for Hubitat Elevation
  *
  *  Author: Carl Rådetorp
- *  Version: 1.0.0
- *  Date: 2025-08-02
+ *  Version: 1.0.1
+ *  Date: 2025-08-27
  *
  *  Description:
  *  Supports EU/US/AU Z-Wave 800-series models. Includes multi-clamp endpoint metering,
@@ -18,6 +18,7 @@ metadata {
         capability "Voltage Measurement"
         capability "Refresh"
         capability "Configuration"
+        capability "Sensor"
 
         command "getConfig"
         command "resetMeter"
@@ -75,17 +76,15 @@ def initialize() {
     configure()
 }
 
-// Continuation of driver functionality
-
 def configure() {
     def cmds = []
     cmds += [
-        zwave.configurationV1.configurationSet(parameterNumber: 101, size: 4, scaledConfigurationValue: (settings?.group1ReportValues ?: 50529024).toInteger()).format(),
-        zwave.configurationV1.configurationSet(parameterNumber: 102, size: 4, scaledConfigurationValue: (settings?.group2ReportValues ?: 202116096).toInteger()).format(),
-        zwave.configurationV1.configurationSet(parameterNumber: 103, size: 4, scaledConfigurationValue: (settings?.group3ReportValues ?: 4042321920).toInteger()).format(),
-        zwave.configurationV1.configurationSet(parameterNumber: 104, size: 4, scaledConfigurationValue: (settings?.group4ReportValues ?: 50529024).toInteger()).format(),
-        zwave.configurationV1.configurationSet(parameterNumber: 105, size: 4, scaledConfigurationValue: (settings?.group5ReportValues ?: 202116096).toInteger()).format(),
-        zwave.configurationV1.configurationSet(parameterNumber: 106, size: 4, scaledConfigurationValue: (settings?.group6ReportValues ?: 4042321920).toInteger()).format(),
+        zwave.configurationV1.configurationSet(parameterNumber: 101, size: 4, scaledConfigurationValue: toSigned32(settings?.group1ReportValues ?: 50529024)).format(),
+        zwave.configurationV1.configurationSet(parameterNumber: 102, size: 4, scaledConfigurationValue: toSigned32(settings?.group2ReportValues ?: 202116096)).format(),
+        zwave.configurationV1.configurationSet(parameterNumber: 103, size: 4, scaledConfigurationValue: toSigned32(settings?.group3ReportValues ?: 4042321920)).format(),
+        zwave.configurationV1.configurationSet(parameterNumber: 104, size: 4, scaledConfigurationValue: toSigned32(settings?.group4ReportValues ?: 50529024)).format(),
+        zwave.configurationV1.configurationSet(parameterNumber: 105, size: 4, scaledConfigurationValue: toSigned32(settings?.group5ReportValues ?: 202116096)).format(),
+        zwave.configurationV1.configurationSet(parameterNumber: 106, size: 4, scaledConfigurationValue: toSigned32(settings?.group6ReportValues ?: 4042321920)).format(),
         zwave.configurationV1.configurationSet(parameterNumber: 111, size: 4, scaledConfigurationValue: (settings?.group1ReportInterval ?: 3600).toInteger()).format(),
         zwave.configurationV1.configurationSet(parameterNumber: 112, size: 4, scaledConfigurationValue: (settings?.group2ReportInterval ?: 7200).toInteger()).format(),
         zwave.configurationV1.configurationSet(parameterNumber: 113, size: 4, scaledConfigurationValue: (settings?.group3ReportInterval ?: 7200).toInteger()).format(),
@@ -93,6 +92,15 @@ def configure() {
         zwave.configurationV1.configurationSet(parameterNumber: 115, size: 4, scaledConfigurationValue: (settings?.group5ReportInterval ?: 7200).toInteger()).format(),
         zwave.configurationV1.configurationSet(parameterNumber: 116, size: 4, scaledConfigurationValue: (settings?.group6ReportInterval ?: 7200).toInteger()).format()
     ]
+
+log.info "Configured report groups 101–106 and intervals 111–116 with: " +
+         "G1=${settings?.group1ReportValues}/${settings?.group1ReportInterval}s, " +
+         "G2=${settings?.group2ReportValues}/${settings?.group2ReportInterval}s, " +
+         "G3=${settings?.group3ReportValues}/${settings?.group3ReportInterval}s, " +
+         "G4=${settings?.group4ReportValues}/${settings?.group4ReportInterval}s, " +
+         "G5=${settings?.group5ReportValues}/${settings?.group5ReportInterval}s, " +
+         "G6=${settings?.group6ReportValues}/${settings?.group6ReportInterval}s"
+
     return delayBetween(cmds, 500)
 }
 
@@ -176,6 +184,30 @@ def endpoint0Refresh() {
     return delayBetween(cmds, 300)
 }
 
+/**
+ * Refresh algebraic/net summary endpoints (5–8) for kWh and W.
+ * EP5: Clamp 1+2+3 algebraic, EP6: Clamp 1+2 net, EP7: algebraic? EP8: net? (varies by region/firmware)
+ * We keep it minimal: request kWh (scale 0) and W (scale 2).
+ */
+def refreshEp5to8() {
+    def cmds = []
+    (5..8).each { ep ->
+        try {
+            def mcClass = zwave?.multiChannelV4
+            if (mcClass) {
+                def encapW = mcClass.multiChannelCmdEncap(destinationEndPoint: ep, commandClass: 0x32, command: 0x01, parameter: [0x00, 0x00, 0x00, 0x02]) // MeterGet scale=2 (W)
+                def encapKWh = mcClass.multiChannelCmdEncap(destinationEndPoint: ep, commandClass: 0x32, command: 0x01, parameter: [0x00, 0x00, 0x00, 0x00]) // MeterGet scale=0 (kWh)
+                if (encapW?.respondsTo('format')) cmds << encapW.format()
+                if (encapKWh?.respondsTo('format')) cmds << encapKWh.format()
+            }
+        } catch (Exception e) {
+            log.warn "Failed to format refresh for endpoint ${ep}: ${e.message}"
+        }
+    }
+    return delayBetween(cmds, 300)
+}
+
+
 def parse(String description) {
     try {
         def cmd = zwave.parse(description, getCommandClassVersions())
@@ -224,6 +256,9 @@ def zwaveEvent(hubitat.zwave.commands.multichannelv4.MultiChannelCmdEncap cmd) {
     }
 }
 
+def zwaveEvent(hubitat.zwave.commands.configurationv1.ConfigurationReport cmd) {
+    log.info "ConfigurationReport: Param ${cmd.parameterNumber} = ${cmd.scaledConfigurationValue} (size ${cmd.size})"
+}
 
 
 def zwaveEvent(hubitat.zwave.commands.supervisionv1.SupervisionGet cmd) {
@@ -231,7 +266,7 @@ def zwaveEvent(hubitat.zwave.commands.supervisionv1.SupervisionGet cmd) {
     return zwave.supervisionV1.supervisionReport(
         sessionID: cmd.sessionID,
         moreStatusUpdates: false,
-        status: 0xFF
+        status: 0x00
     ).format()
 }
 
@@ -243,10 +278,21 @@ def zwaveEvent(hubitat.zwave.Command cmd) {
     }
 }
 
+
+private int toSigned32(def v) {
+    long lv = (v instanceof String) ? (v.isInteger() ? Long.parseLong(v) : 0L) : (v as long)
+    if (lv > 2147483647L) {
+        return (int)(lv - 4294967296L)
+    } else if (lv < -2147483648L) {
+        return (int)(lv + 4294967296L)
+    }
+    return (int) lv
+}
+
 private getCommandClassVersions() {
     [
-        0x32: 4, // Meter
-        0x60: 3, // MultiChannel
+        0x32: 5, // Meter
+        0x60: 4, // MultiChannel
         0x5E: 2, // Z-Wave Plus Info
         0x6C: 1, // Supervision
         0x70: 2, // Configuration
