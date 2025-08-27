@@ -1,22 +1,23 @@
 /**
- * INNR AE264 Zigbee Dimmable Bulb Driver for Hubitat Elevation
+ * Innr AE 264 Zigbee Dimmable Bulb Driver for Hubitat Elevation
  *
  *  Author: Carl Rådetorp
  *  Namespace: calle
- *  Version: 1.0.0
- *  Date: 2025-08-23
+ *  Version: 1.0.1
+ *  Date: 2025-08-27
  *
  *  Description:
- *  Native Hubitat Zigbee driver for INNR AE264 (E26 dimmable white) bulbs.
+ *  Native Hubitat Zigbee driver for Innr AE 264 (E26 dimmable white) bulbs.
  *  Provides on/off, level control, standard reporting, health check,
  *  and full support for Power-On Behavior (StartUpOnOff) with read-back.
  *
  *  Changelog:
  *  1.0.0 - Initial release with StartUpOnOff preference, command, and dashboard-friendly attributes
+ *  1.0.1 - Fix StartUpOnOff mapping: 0xFF = Last State, 0x02 = Toggle
  */
 
 metadata {
-    definition(name: "INNR AE264 Dimmable Bulb", namespace: "calle", author: "Carl Rådetorp") {
+    definition(name: "Innr AE 264 Dimmable Bulb", namespace: "calle", author: "Carl Rådetorp") {
         capability "Actuator"
         capability "Sensor"               // for Dashboard Attribute tiles
         capability "Switch"
@@ -26,7 +27,7 @@ metadata {
         capability "Health Check"
 
         attribute "Status", "string"
-        attribute "powerOnBehavior", "string"     // text: Off/On/Last State/Bulb Default
+        attribute "powerOnBehavior", "string"     // text: Off/On/Toggle/Last State
         attribute "powerOnBehaviorCode", "number" // numeric: 0/1/2/255
 
         command "configure"
@@ -34,12 +35,12 @@ metadata {
         command "setPowerOnBehavior"
         command "refreshPowerOnBehavior"
 
-        // Fingerprint for INNR AE264 (dimmable, no color cluster 0x0300)
+        // Fingerprint for Innr AE 264 (dimmable, no color cluster 0x0300)
         fingerprint profileId: "0104",
                     inClusters: "0000,0003,0004,0005,0006,0008",
                     outClusters: "0019,000A",
-                    manufacturer: "INNR",
-                    model: "AE264"
+                    manufacturer: "Innr",
+                    model: "AE 264"
     }
 
     preferences {
@@ -47,7 +48,7 @@ metadata {
         input name: "transitionTime", type: "number", title: "Transition Time (seconds)", defaultValue: 1, range: "0..10"
         input name: "offlineTimeout", type: "number", title: "Timeout for offline status (minutes)", defaultValue: 10, range: "1..120"
         input name: "powerOnBehavior", type: "enum", title: "Power-On Behavior",
-              options: ["0":"Off", "1":"On", "2":"Last State", "255":"Bulb Default"],
+              options: ["0":"Off", "1":"On", "2":"Toggle", "255":"Last State"],
               defaultValue: "255"
     }
 }
@@ -58,8 +59,8 @@ private String startUpOnOffToText(Integer val) {
     switch (val) {
         case 0: return "Off"
         case 1: return "On"
-        case 2: return "Last State"
-        case 255: return "Bulb Default"
+        case 2: return "Toggle"
+        case 255: return "Last State"
         default: return "Unknown (" + val + ")"
     }
 }
