@@ -3,13 +3,13 @@
  *
  *  Author: Carl Rådetorp
  *  Namespace: calle
- *  Version: 1.2.0
- *  Date: 2025-09-29
+ *  Version: 1.2.1
+ *  Date: 2025-11-25
  *
  *  Description:
  *  Native Hubitat Zigbee driver for:
  *   • INNR AE264 (E26 dimmable white)
- *   • INNR RB 247 T (E27 tunable white)
+ *   • INNR RB247T (E27 tunable white)
  *
  *  Provides on/off, level control, color temperature (RB 247 T),
  *  standard reporting, Hubitat-style health check (ping + offline status),
@@ -21,12 +21,13 @@
  *  1.1.0 - Add Color Temperature capability + parsing for devices with 0x0300 (tunable white)
  *  1.2.0 - Add fingerprint for INNR RB247T, Touchlink cluster 0x1000, controllerType ZGB;
  *          add reporting for ColorTemperature Mireds; refine health check
+ *  1.2.1 - Add dimmer capability
  */
 
 import hubitat.zigbee.zcl.DataType
 
 metadata {
-    definition(name: "INNR Zigbee Bulb AE264 & RB247T", namespace: "calle", author: "Carl Rådetorp") {
+    definition(name: "INNR Bulb AE264 & RB247T", namespace: "calle", author: "Carl Rådetorp") {
         capability "Actuator"
         capability "Sensor"               // for Dashboard Attribute tiles
         capability "Switch"
@@ -45,6 +46,11 @@ metadata {
         command "ping"
         command "setPowerOnBehavior"
         command "refreshPowerOnBehavior"
+
+        // Continuous dimming commands for button controllers
+        command "startLevelChange", ["string"]
+        command "stopLevelChange"
+
 
         // Fingerprint for INNR AE264 (dimmable, no color cluster 0x0300)
         fingerprint profileId: "0104",
@@ -237,6 +243,39 @@ def setLevel(level, duration = null) {
         state.lastLevel = level
     }
     zigbee.setLevel(level, rate)
+}
+
+
+// Continuous level change for button hold (Dimmer Button Controller, etc.)
+def startLevelChange(direction) {
+    if (debugLogging) log.debug "startLevelChange(${direction})"
+
+    // 0x00 = up, 0x01 = down
+    int moveMode = (direction?.toString()?.toLowerCase() == "down") ? 0x01 : 0x00
+
+    // Dimming speed (steps per second) – tweak to taste if you want it faster/slower
+    int rate = 0x05
+
+    String payload = zigbee.hexString(moveMode, 2) + zigbee.hexString(rate, 2)
+
+    // Level Control cluster 0x0008, command 0x05 = Move with On/Off
+    def cmds = []
+    cmds += zigbee.command(0x0008, 0x05, payload)
+
+    if (debugLogging) log.debug "startLevelChange payload: ${payload}, cmds: ${cmds}"
+    return cmds
+}
+
+// Stop continuous level change when button is released.
+def stopLevelChange() {
+    if (debugLogging) log.debug "stopLevelChange()"
+
+    // Level Control cluster 0x0008, command 0x07 = Stop with On/Off
+    def cmds = []
+    cmds += zigbee.command(0x0008, 0x07)
+
+    if (debugLogging) log.debug "stopLevelChange cmds: ${cmds}"
+    return cmds
 }
 
 // --- Color Temperature (RB 247 T) ---
